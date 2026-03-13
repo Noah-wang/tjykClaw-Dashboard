@@ -1,0 +1,18 @@
+WS opened.
+Incoming: {
+  "type": "event",
+  "event": "connect.challenge",
+  "payload": {
+    "nonce": "3f3b151d-12ee-4694-a085-771ac7099dfd",
+    "ts": 1773433901148
+  }
+}
+Incoming: {
+  "type": "res",
+  "id": "auth-1",
+  "ok": false,
+  "error": {
+    "code": "INVALID_REQUEST",
+    "message": "origin not allowed (open the Control UI from the gateway host or allow it in gateway.controlUi.allowedOrigins)"
+  }
+}

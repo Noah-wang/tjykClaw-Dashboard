@@ -1,0 +1,11 @@
+#cloud-config
+package_update: false
+package_upgrade: false
+
+# Keep first boot minimal. All real provisioning happens in
+# simulators/linux-device/bootstrap-inside-vm.sh after the VM is reachable.
+write_files:
+  - path: /etc/motd
+    permissions: "0644"
+    content: |
+      tjykClaw-Dashboard Linux device simulator

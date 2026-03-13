@@ -1,0 +1,30 @@
+{
+  "name": "tjykclaw-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "mock-device": "node mock-device-server.mjs",
+    "device-bridge": "node real-device-bridge.mjs"
+  },
+  "dependencies": {
+    "bonjour-service": "^1.3.0",
+    "lucide-react": "^0.563.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.13.0",
+    "sonner": "^2.0.7",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.1.4",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1"
+  },
+  "packageManager": "pnpm@10.31.0"
+}
