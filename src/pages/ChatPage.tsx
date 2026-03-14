@@ -2,10 +2,13 @@ import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import {
   abortChat,
+  buildMainSessionKey,
+  buildNewSessionKey,
   deleteSession,
   getAgents,
   getChatHistory,
   getChatSessions,
+  isCurrentClientSession,
   readDeviceProfile,
   sendChatMessage,
   stageFileBuffer,
@@ -20,12 +23,15 @@ function normalizeMessageContent(content: unknown): string {
       .map((item) => {
         if (!item || typeof item !== 'object') return safePretty(item);
         const record = item as Record<string, unknown>;
-        return typeof record.text === 'string'
-          ? record.text
-          : typeof record.thinking === 'string'
-            ? record.thinking
-            : safePretty(record);
+        if (record.type === 'toolCall' || record.type === 'toolResult') return '';
+        if (record.type === 'thinking') return '';
+        if (typeof record.text === 'string') return record.text;
+        if (typeof record.content === 'string') return record.content;
+        if (record.type === 'text' && typeof record.value === 'string') return record.value;
+        if (typeof record.thinking === 'string') return '';
+        return '';
       })
+      .filter(Boolean)
       .join('\n\n');
   }
   return safePretty(content);
@@ -35,14 +41,12 @@ export function ChatPage() {
   const [agents, setAgents] = useState<AgentSummary[]>([]);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentAgentId, setCurrentAgentId] = useState('main');
-  const [currentSessionKey, setCurrentSessionKey] = useState('agent:main:main');
+  const [currentSessionKey, setCurrentSessionKey] = useState(() => buildMainSessionKey('main'));
   const [messages, setMessages] = useState<RawMessage[]>([]);
   const [draft, setDraft] = useState('');
   const [attachments, setAttachments] = useState<StagedFile[]>([]);
   const [sending, setSending] = useState(false);
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [lastIncomingContent, setLastIncomingContent] = useState('');
-  const [idleTicks, setIdleTicks] = useState(0);
+  const [loadingHistory, setLoadingHistory] = useState(true);
 
   const loadAgents = async () => {
     const snapshot = await getAgents();
@@ -55,15 +59,16 @@ export function ChatPage() {
   const loadSessions = async () => {
     const next = await getChatSessions();
     setSessions(next);
-    if (!next.find((session) => session.key === currentSessionKey)) {
-      const currentAgent = agents.find((agent) => agent.id === currentAgentId);
-      setCurrentSessionKey(currentAgent?.mainSessionKey || `agent:${currentAgentId}:main`);
+    if (!next.find((session) => session.key === currentSessionKey && isCurrentClientSession(session.key))) {
+      setCurrentSessionKey(buildMainSessionKey(currentAgentId));
     }
   };
 
   const loadHistory = async (sessionKey = currentSessionKey) => {
+    setLoadingHistory(true);
     const history = await getChatHistory(sessionKey);
     setMessages(history);
+    setLoadingHistory(false);
   };
 
   useEffect(() => {
@@ -92,42 +97,20 @@ export function ChatPage() {
   }, [currentSessionKey, currentAgentId]);
 
   useEffect(() => {
-    if (isGenerating) {
-      const timer = window.setInterval(() => {
-        void loadSessions();
-        void loadHistory();
-        setIdleTicks((prev) => prev + 1);
-      }, 1000);
-      return () => window.clearInterval(timer);
-    }
-  }, [isGenerating, currentSessionKey]);
-
-  useEffect(() => {
-    const lastMessage = messages[messages.length - 1];
-    if (!lastMessage) return;
-
-    if (lastMessage.role === 'user') {
-      setIsGenerating(true);
-      setIdleTicks(0);
-    } else if (lastMessage.role === 'assistant') {
-      const content = normalizeMessageContent(lastMessage.content);
-      if (content !== lastIncomingContent) {
-        setLastIncomingContent(content);
-        setIdleTicks(0);
-        setIsGenerating(true); // Content is actively growing
-      } else if (idleTicks > 3) {
-        setIsGenerating(false); // Generation stopped
-      }
-    }
-  }, [messages, idleTicks, lastIncomingContent]);
+    const timer = window.setInterval(() => {
+      void loadSessions();
+      void loadHistory();
+    }, sending ? 2000 : 6000);
+    return () => window.clearInterval(timer);
+  }, [currentSessionKey, currentAgentId, sending]);
 
   const visibleSessions = useMemo(
-    () => sessions.filter((session) => session.key.startsWith(`agent:${currentAgentId}:`)),
+    () => sessions.filter((session) => session.key.startsWith(`agent:${currentAgentId}:`) && isCurrentClientSession(session.key)),
     [currentAgentId, sessions],
   );
 
   const handleNewSession = () => {
-    const key = `agent:${currentAgentId}:session-${Date.now()}`;
+    const key = buildNewSessionKey(currentAgentId);
     setCurrentSessionKey(key);
     setMessages([]);
   };
@@ -140,27 +123,37 @@ export function ChatPage() {
 
   const handleSend = async () => {
     if (!draft.trim() && attachments.length === 0) return;
-
-    // Optimistic UI update
-    const optimisticMessage: RawMessage = {
-      id: `temp-${Date.now()}`,
-      role: 'user',
-      content: draft,
-    };
-    setMessages((prev) => [...prev, optimisticMessage]);
-
+    const messageText = draft;
+    const stagedAttachments = attachments;
     setSending(true);
+    setMessages((current) => [
+      ...current,
+      {
+        id: `pending-${Date.now()}`,
+        role: 'user',
+        content: messageText,
+        timestamp: Date.now(),
+        _attachedFiles: stagedAttachments,
+      },
+    ]);
+    const pollTimer = window.setInterval(() => {
+      void loadSessions();
+      void loadHistory();
+    }, 3000);
     try {
-      await sendChatMessage(currentSessionKey, draft, attachments);
+      await sendChatMessage(currentSessionKey, messageText, stagedAttachments);
       setDraft('');
       setAttachments([]);
       window.setTimeout(() => {
         void loadSessions();
         void loadHistory();
-      }, 1200);
+      }, 700);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error(message);
+      void loadHistory();
     } finally {
+      window.clearInterval(pollTimer);
       setSending(false);
     }
   };
@@ -207,7 +200,15 @@ export function ChatPage() {
               <p>{currentSessionKey}</p>
             </div>
             <div className="cluster">
-              <button className="button ghost" onClick={() => void abortChat(currentSessionKey)}>
+              <button
+                className="button ghost"
+                onClick={() =>
+                  void abortChat(currentSessionKey).finally(() => {
+                    setSending(false);
+                    void loadHistory();
+                  })
+                }
+              >
                 中止运行
               </button>
               <button className="button danger" onClick={() => void deleteSession(currentSessionKey).then(loadSessions)}>
@@ -217,22 +218,20 @@ export function ChatPage() {
           </div>
 
           <div className="chat-thread">
+            {loadingHistory ? <div className="empty">正在同步会话内容…</div> : null}
             {messages.map((message, index) => (
-              <div className={`message ${message.role}`} key={message.id || index}>
-                <div className="eyebrow">{formatMessageRole(message.role)}</div>
-                <pre>{normalizeMessageContent(message.content)}</pre>
-              </div>
+              (() => {
+                const normalized = normalizeMessageContent(message.content);
+                if (!normalized) return null;
+                return (
+                  <div className={`message ${message.role}`} key={message.id || index}>
+                    <div className="eyebrow">{formatMessageRole(message.role)}</div>
+                    <pre>{normalized}</pre>
+                  </div>
+                );
+              })()
             ))}
-            {isGenerating && messages[messages.length - 1]?.role === 'user' ? (
-              <div className="message assistant" key="thinking">
-                <div className="eyebrow">{formatMessageRole('assistant')}</div>
-                <div className="thinking-indicator">
-                  <span className="dot"></span><span className="dot"></span><span className="dot"></span>
-                  正在思考并生成回复...
-                </div>
-              </div>
-            ) : null}
-            {messages.length === 0 ? <div className="empty">当前会话还没有历史消息。</div> : null}
+            {!loadingHistory && messages.length === 0 ? <div className="empty">当前会话还没有历史消息。</div> : null}
           </div>
 
           <div className="chat-compose">
@@ -249,7 +248,7 @@ export function ChatPage() {
                   setCurrentAgentId(newAgentId);
                   const agent = agents.find((a) => a.id === newAgentId);
                   if (agent) {
-                    setCurrentSessionKey(agent.mainSessionKey || `agent:${newAgentId}:main`);
+                    setCurrentSessionKey(buildMainSessionKey(newAgentId));
                   }
                 }}
               >

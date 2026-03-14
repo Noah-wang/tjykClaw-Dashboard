@@ -20,16 +20,40 @@ export function OverviewPage(props: {
   const [providers, setProviders] = useState(0);
   const [jobs, setJobs] = useState(0);
   const [usage, setUsage] = useState<UsageHistoryEntry[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    void Promise.all([
-      getAgents().then((snapshot) => setAgents(snapshot.agents.length)),
-      getChannels().then((items) => setChannels(items.length)),
-      getInstalledSkills().then((items) => setSkills(items.length)),
-      getProviders().then((items) => setProviders(items.length)),
-      getCronJobs().then((items) => setJobs(items.length)),
-      getUsageHistory().then((items) => setUsage(items)),
-    ]);
+    let cancelled = false;
+
+    const load = async () => {
+      const results = await Promise.allSettled([
+        getAgents(),
+        getChannels(),
+        getInstalledSkills(),
+        getProviders(),
+        getCronJobs(),
+        getUsageHistory(),
+      ]);
+      if (cancelled) return;
+
+      if (results[0].status === 'fulfilled') setAgents(results[0].value.agents.length);
+      if (results[1].status === 'fulfilled') setChannels(results[1].value.length);
+      if (results[2].status === 'fulfilled') setSkills(results[2].value.length);
+      if (results[3].status === 'fulfilled') setProviders(results[3].value.length);
+      if (results[4].status === 'fulfilled') setJobs(results[4].value.length);
+      if (results[5].status === 'fulfilled') setUsage(results[5].value);
+      setLoading(false);
+    };
+
+    void load();
+    const timer = window.setInterval(() => {
+      void load();
+    }, 8000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, []);
 
   const usageSummary = useMemo(() => {
@@ -73,17 +97,17 @@ export function OverviewPage(props: {
       <section className="grid-3">
         <div className="stat-card panel">
           <span>智能体</span>
-          <strong>{agents}</strong>
+          <strong>{loading ? '...' : agents}</strong>
           <div className="stat-note">已配置的 OpenClaw 运行实例</div>
         </div>
         <div className="stat-card panel">
           <span>渠道</span>
-          <strong>{channels}</strong>
+          <strong>{loading ? '...' : channels}</strong>
           <div className="stat-note">已启用的消息集成</div>
         </div>
         <div className="stat-card panel">
           <span>技能</span>
-          <strong>{skills}</strong>
+          <strong>{loading ? '...' : skills}</strong>
           <div className="stat-note">已安装的能力包</div>
         </div>
       </section>
@@ -91,17 +115,17 @@ export function OverviewPage(props: {
       <section className="grid-3">
         <div className="stat-card panel">
           <span>提供商</span>
-          <strong>{providers}</strong>
+          <strong>{loading ? '...' : providers}</strong>
           <div className="stat-note">可供运行时使用的账号条目</div>
         </div>
         <div className="stat-card panel">
           <span>定时任务</span>
-          <strong>{jobs}</strong>
+          <strong>{loading ? '...' : jobs}</strong>
           <div className="stat-note">当前已注册的自动化任务</div>
         </div>
         <div className="stat-card panel">
           <span>近期花费</span>
-          <strong>{formatCurrency(usageSummary.cost)}</strong>
+          <strong>{loading ? '...' : formatCurrency(usageSummary.cost)}</strong>
           <div className="stat-note">已追踪历史中共 {formatTokens(usageSummary.totalTokens)} 个 Token</div>
         </div>
       </section>

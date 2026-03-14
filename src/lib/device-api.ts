@@ -5,6 +5,8 @@ import type {
   CronJob,
   DeviceProfile,
   GatewayStatus,
+  LobsterDocument,
+  LobsterDocumentSummary,
   MarketplaceSkill,
   ProviderAccount,
   ProviderVendor,
@@ -18,6 +20,7 @@ import { createId } from './id';
 
 const DEVICE_KEY = 'tjykclaw-dashboard.device';
 const LEGACY_DEVICE_KEY = 'clawx-web-lan.device';
+const CHAT_CLIENT_KEY = 'tjykclaw-dashboard.chat-client';
 
 type DeviceResponse<T> = T & { success?: boolean; error?: string };
 
@@ -73,6 +76,26 @@ export function saveDeviceProfile(profile: DeviceProfile): void {
 export function clearDeviceProfile(): void {
   window.localStorage.removeItem(DEVICE_KEY);
   window.localStorage.removeItem(LEGACY_DEVICE_KEY);
+}
+
+export function getChatClientId(): string {
+  const existing = window.localStorage.getItem(CHAT_CLIENT_KEY);
+  if (existing) return existing;
+  const next = createId();
+  window.localStorage.setItem(CHAT_CLIENT_KEY, next);
+  return next;
+}
+
+export function buildMainSessionKey(agentId: string): string {
+  return `agent:${agentId}:main:${getChatClientId()}`;
+}
+
+export function buildNewSessionKey(agentId: string): string {
+  return `agent:${agentId}:session-${Date.now()}:${getChatClientId()}`;
+}
+
+export function isCurrentClientSession(sessionKey: string): boolean {
+  return String(sessionKey || '').endsWith(`:${getChatClientId()}`);
 }
 
 function ensureDeviceBase(baseUrl?: string): string {
@@ -392,6 +415,22 @@ export async function getLogs(): Promise<{ content: string }> {
   return deviceFetch('/api/logs?tailLines=180');
 }
 
+export async function getLobsterDocuments(): Promise<LobsterDocumentSummary[]> {
+  const response = await deviceFetch<{ items: LobsterDocumentSummary[] }>('/api/lobster/documents');
+  return response.items || [];
+}
+
+export async function getLobsterDocument(documentId: string): Promise<LobsterDocument> {
+  return deviceFetch(`/api/lobster/documents/${encodeURIComponent(documentId)}`);
+}
+
+export async function saveLobsterDocument(documentId: string, content: string): Promise<LobsterDocument> {
+  return deviceFetch(`/api/lobster/documents/${encodeURIComponent(documentId)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ content }),
+  });
+}
+
 export async function runDoctor(mode: 'diagnose' | 'fix' = 'diagnose'): Promise<Record<string, unknown>> {
   return deviceFetch('/api/app/openclaw-doctor', {
     method: 'POST',
@@ -426,19 +465,32 @@ export async function sendChatMessage(
   message: string,
   media: StagedFile[],
 ): Promise<void> {
-  await deviceFetch('/api/chat/send-with-media', {
-    method: 'POST',
-    body: JSON.stringify({
-      sessionKey,
-      message,
-      idempotencyKey: createId(),
-      media: media.map((file) => ({
-        filePath: file.stagedPath,
-        mimeType: file.mimeType,
-        fileName: file.fileName,
-      })),
-    }),
-  });
+  const controller = new AbortController();
+  const timeoutMs = 120_000;
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    await deviceFetch('/api/chat/send-with-media', {
+      method: 'POST',
+      signal: controller.signal,
+      body: JSON.stringify({
+        sessionKey,
+        message,
+        idempotencyKey: createId(),
+        media: media.map((file) => ({
+          filePath: file.stagedPath,
+          mimeType: file.mimeType,
+          fileName: file.fileName,
+        })),
+      }),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('发送超时，模型可能仍在后台运行。请等待几秒刷新会话，或点击“中止运行”。');
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 
 export async function deleteSession(sessionKey: string): Promise<void> {
@@ -459,7 +511,7 @@ export async function getChatSessions(): Promise<ChatSession[]> {
       model: typeof session.model === 'string' ? session.model : undefined,
       updatedAt: typeof session.updatedAt === 'number' ? session.updatedAt : undefined,
     }))
-    .filter((session) => session.key);
+    .filter((session) => session.key && isCurrentClientSession(session.key));
 }
 
 export async function getChatHistory(sessionKey: string): Promise<RawMessage[]> {

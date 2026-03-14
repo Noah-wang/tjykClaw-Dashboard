@@ -10,20 +10,28 @@ import type { MarketplaceSkill, SkillRecord } from '../lib/types';
 
 export function SkillsPage() {
   const [installed, setInstalled] = useState<SkillRecord[]>([]);
-  const [query, setQuery] = useState('搜索');
+  const [query, setQuery] = useState('');
   const [results, setResults] = useState<MarketplaceSkill[]>([]);
+  const [loadingInstalled, setLoadingInstalled] = useState(true);
+  const [loadingSearch, setLoadingSearch] = useState(false);
 
   const loadInstalled = async () => {
     setInstalled(await getInstalledSkills());
+    setLoadingInstalled(false);
   };
 
   useEffect(() => {
     void loadInstalled();
-    void handleSearch();
   }, []);
 
   const handleSearch = async () => {
+    if (!query.trim()) {
+      setResults([]);
+      return;
+    }
+    setLoadingSearch(true);
     setResults(await searchMarketplace(query));
+    setLoadingSearch(false);
   };
 
   return (
@@ -37,6 +45,7 @@ export function SkillsPage() {
             </div>
           </div>
           <div className="chat-list">
+            {loadingInstalled ? <div className="empty">正在读取已安装技能…</div> : null}
             {installed.map((skill) => (
               <div className="selectable-row" key={skill.id}>
                 <strong>{skill.name}</strong>
@@ -57,7 +66,7 @@ export function SkillsPage() {
                 ) : null}
               </div>
             ))}
-            {installed.length === 0 ? <div className="empty">设备暂未返回已安装技能。</div> : null}
+            {!loadingInstalled && installed.length === 0 ? <div className="empty">设备暂未返回已安装技能。</div> : null}
           </div>
         </div>
 
@@ -82,6 +91,7 @@ export function SkillsPage() {
           </div>
 
           <div className="chat-list">
+            {loadingSearch ? <div className="empty">正在搜索技能市场…</div> : null}
             {results.map((skill) => (
               <div className="selectable-row" key={skill.slug}>
                 <strong>{skill.name}</strong>
@@ -101,6 +111,7 @@ export function SkillsPage() {
                 </div>
               </div>
             ))}
+            {!loadingSearch && results.length === 0 && !query.trim() ? <div className="empty">输入关键词后再搜索技能市场。</div> : null}
           </div>
         </div>
       </section>

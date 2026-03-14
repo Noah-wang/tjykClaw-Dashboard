@@ -4,6 +4,19 @@ export type DeviceProfile = {
   pairedAt: string;
 };
 
+export type LobsterDocumentSummary = {
+  id: string;
+  name: string;
+  description: string;
+  path: string;
+  updatedAt?: string | null;
+  size: number;
+};
+
+export type LobsterDocument = LobsterDocumentSummary & {
+  content: string;
+};
+
 export type GatewayStatus = {
   state: string;
   port: number;

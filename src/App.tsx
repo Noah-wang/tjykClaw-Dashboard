@@ -63,7 +63,7 @@ function App() {
     void refreshGateway();
     const timer = window.setInterval(() => {
       void refreshGateway();
-    }, 12000);
+    }, 5000);
     return () => window.clearInterval(timer);
   }, [device, refreshGateway]);
 

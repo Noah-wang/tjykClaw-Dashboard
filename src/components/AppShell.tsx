@@ -1,5 +1,6 @@
-import { Activity, Bot, Clock3, Cpu, KeyRound, Radio, Settings2, Sparkles } from 'lucide-react';
-import { NavLink, Outlet } from 'react-router-dom';
+import { Activity, Bot, ChevronDown, Clock3, Cpu, KeyRound, Radio, Settings2, Sparkles } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { NavLink, Outlet, useLocation } from 'react-router-dom';
 
 const navItems = [
   { to: '/', label: '总览', hint: '实时状态', icon: Activity },
@@ -13,15 +14,31 @@ const navItems = [
 ];
 
 export function AppShell() {
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const location = useLocation();
+
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [location.pathname]);
+
   return (
     <div className="shell">
-      <aside className="sidebar panel">
+      <aside className={`sidebar panel ${mobileNavOpen ? 'mobile-nav-open' : ''}`}>
         <div className="brand">
           <h1>天玑云科Claw</h1>
           <p>
             面向局域网智能硬件的浏览器控制台。
           </p>
         </div>
+
+        <button
+          className={`mobile-nav-toggle ${mobileNavOpen ? 'open' : ''}`}
+          type="button"
+          onClick={() => setMobileNavOpen((current) => !current)}
+        >
+          <span>页面导航</span>
+          <ChevronDown size={16} />
+        </button>
 
         <nav className="nav-list">
           {navItems.map((item) => {

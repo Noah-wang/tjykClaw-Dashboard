@@ -75,8 +75,23 @@ export function ProvidersPage() {
   };
 
   useEffect(() => {
+    let cancelled = false;
+
+    const loadUsage = async () => {
+      const next = await getUsageHistory();
+      if (!cancelled) setUsageEntries(next);
+    };
+
     void load();
-    void getUsageHistory().then(setUsageEntries);
+    void loadUsage();
+    const timer = window.setInterval(() => {
+      void loadUsage();
+    }, 8000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, []);
 
   const usageGrouped = useMemo(() => {

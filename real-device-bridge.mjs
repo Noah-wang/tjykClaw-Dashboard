@@ -7,6 +7,18 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { Bonjour } from 'bonjour-service';
 
+function getClientIdFromIp(ip) {
+  const value = String(ip || '');
+  const isLocalhost =
+    value === '127.0.0.1' ||
+    value === '::1' ||
+    value.includes('127.0.0.1') ||
+    value.includes('localhost');
+  if (isLocalhost) return 'local';
+  return value.replace(/^.*:/, '').replace(/[^a-zA-Z0-9]/g, '_') || 'unknown';
+}
+
+
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 3210);
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || 'openclaw';
@@ -14,10 +26,21 @@ const DIST_DIR = path.join(process.cwd(), 'dist');
 const STATE_DIR = path.join(os.homedir(), '.tjykclaw-dashboard-bridge');
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 const OPENCLAW_DIR = path.join(os.homedir(), '.openclaw');
+const WORKSPACE_DIR = path.join(OPENCLAW_DIR, 'workspace');
 const OPENCLAW_CONFIG = path.join(OPENCLAW_DIR, 'openclaw.json');
 const MAIN_AGENT_DIR = path.join(OPENCLAW_DIR, 'agents', 'main', 'agent');
 const AUTH_PROFILES_PATH = path.join(MAIN_AGENT_DIR, 'auth-profiles.json');
 const STAGING_DIR = path.join(STATE_DIR, 'staged');
+
+const LOBSTER_DOCUMENTS = [
+  { id: 'soul', name: 'SOUL.md', path: path.join(WORKSPACE_DIR, 'SOUL.md'), description: '龙虾的行为原则和性格设定。' },
+  { id: 'identity', name: 'IDENTITY.md', path: path.join(WORKSPACE_DIR, 'IDENTITY.md'), description: '龙虾的自我身份和定位。' },
+  { id: 'user', name: 'USER.md', path: path.join(WORKSPACE_DIR, 'USER.md'), description: '关于当前用户的记忆和偏好。' },
+  { id: 'agents', name: 'AGENTS.md', path: path.join(WORKSPACE_DIR, 'AGENTS.md'), description: '工作流和协作约束。' },
+  { id: 'bootstrap', name: 'BOOTSTRAP.md', path: path.join(WORKSPACE_DIR, 'BOOTSTRAP.md'), description: '启动时需要读取的上下文。' },
+  { id: 'tools', name: 'TOOLS.md', path: path.join(WORKSPACE_DIR, 'TOOLS.md'), description: '龙虾可用工具和约束说明。' },
+  { id: 'heartbeat', name: 'HEARTBEAT.md', path: path.join(WORKSPACE_DIR, 'HEARTBEAT.md'), description: '运行节奏与检查点。' },
+];
 
 const DEFAULT_GATEWAY_PORT = Number(process.env.GATEWAY_PORT || 18789);
 
@@ -106,7 +129,20 @@ async function readJson(filePath, fallback) {
     const raw = await fs.readFile(filePath, 'utf8');
     return JSON.parse(raw);
   } catch {
-    return fallback;
+    const defaultSettings = structuredClone(fallback); // Use fallback here
+    if (existsSync(OPENCLAW_CONFIG)) {
+      try {
+        const ocfgRaw = await fs.readFile(OPENCLAW_CONFIG, 'utf8');
+        const ocfg = JSON.parse(ocfgRaw);
+        if (ocfg?.gateway?.auth?.token) {
+          defaultSettings.settings.gatewayToken = ocfg.gateway.auth.token;
+          defaultSettings.settings.gatewayPort = ocfg.gateway.port || DEFAULT_GATEWAY_PORT;
+        }
+      } catch (err) {
+        console.warn('[device-bridge] Failed to read bottom OpenClaw config for token:', err.message);
+      }
+    }
+    return defaultSettings;
   }
 }
 
@@ -203,6 +239,7 @@ async function readBody(req) {
 
 async function runOpenClaw(args, options = {}) {
   return await new Promise((resolve, reject) => {
+    let settled = false;
     const child = spawn(OPENCLAW_BIN, args, {
       env: {
         ...process.env,
@@ -214,6 +251,21 @@ async function runOpenClaw(args, options = {}) {
 
     let stdout = '';
     let stderr = '';
+    const timeoutMs = Number(options.timeoutMs || 0);
+    const timeoutId = timeoutMs > 0
+      ? setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        child.kill('SIGTERM');
+        setTimeout(() => child.kill('SIGKILL'), 1000);
+        reject(new Error(`OpenClaw command timed out after ${timeoutMs}ms: ${args.join(' ')}`));
+      }, timeoutMs)
+      : null;
+
+    const clearTimeoutSafe = () => {
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+
     child.stdout.on('data', (chunk) => {
       stdout += chunk.toString();
     });
@@ -221,8 +273,16 @@ async function runOpenClaw(args, options = {}) {
       stderr += chunk.toString();
     });
 
-    child.on('error', reject);
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeoutSafe();
+      reject(error);
+    });
     child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeoutSafe();
       if (code !== 0) {
         reject(new Error(normalizeOpenClawError(stderr, stdout)));
         return;
@@ -249,12 +309,12 @@ async function gatewayCall(state, method, params = {}) {
     '--json',
     '--url',
     currentGatewayWsUrl(state),
-    '--token',
-    state.settings.gatewayToken,
+    ...(state.settings.gatewayToken ? ['--token', state.settings.gatewayToken] : []),
     '--params',
     JSON.stringify(params),
   ];
-  const { stdout } = await runOpenClaw(args);
+  const timeoutMs = method === 'chat.send' ? 120_000 : 30_000;
+  const { stdout } = await runOpenClaw(args, { timeoutMs });
   return JSON.parse(stdout);
 }
 
@@ -378,35 +438,230 @@ async function deleteChannelConfig(channelType) {
 }
 
 async function readAuthProfiles() {
-  const raw = await readJson(AUTH_PROFILES_PATH, { profiles: {} });
-  return raw.profiles || {};
+  const raw = await readJson(AUTH_PROFILES_PATH, { version: 1, profiles: {}, order: {}, lastGood: {} });
+  return {
+    version: Number(raw?.version || 1),
+    profiles: raw?.profiles && typeof raw.profiles === 'object' ? raw.profiles : {},
+    order: raw?.order && typeof raw.order === 'object' ? raw.order : {},
+    lastGood: raw?.lastGood && typeof raw.lastGood === 'object' ? raw.lastGood : {},
+  };
 }
 
-async function writeAuthProfiles(profiles) {
-  await writeJson(AUTH_PROFILES_PATH, { profiles });
+async function writeAuthProfiles(store) {
+  await writeJson(AUTH_PROFILES_PATH, {
+    version: Number(store?.version || 1),
+    profiles: store?.profiles && typeof store.profiles === 'object' ? store.profiles : {},
+    order: store?.order && typeof store.order === 'object' ? store.order : {},
+    lastGood: store?.lastGood && typeof store.lastGood === 'object' ? store.lastGood : {},
+  });
+}
+
+function defaultProtocolForVendor(vendorId) {
+  if (vendorId === 'anthropic') return 'anthropic-messages';
+  return 'openai-responses';
+}
+
+function inferVendorId(providerKey) {
+  const value = String(providerKey || '').trim();
+  if (!value) return 'openai';
+  if (PROVIDER_VENDORS.some((vendor) => vendor.id === value)) return value;
+  if (value === 'gemini') return 'google';
+  if (value.startsWith('ollama-')) return 'ollama';
+  if (value.startsWith('openai')) return 'openai';
+  if (value.startsWith('anthropic')) return 'anthropic';
+  if (value.startsWith('openrouter')) return 'openrouter';
+  if (value.startsWith('google') || value.startsWith('gemini')) return 'google';
+  return value;
+}
+
+function parseModelRef(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed || trimmed === 'Unconfigured') {
+    return { providerKey: undefined, modelId: undefined, raw: undefined };
+  }
+  const slashIndex = trimmed.indexOf('/');
+  if (slashIndex === -1) {
+    return { providerKey: undefined, modelId: trimmed, raw: trimmed };
+  }
+  return {
+    providerKey: trimmed.slice(0, slashIndex),
+    modelId: trimmed.slice(slashIndex + 1),
+    raw: trimmed,
+  };
+}
+
+function providerKeyMatches(account, runtimeProviderKey) {
+  const current = String(runtimeProviderKey || '').trim();
+  if (!current) return false;
+  const metadata = account.metadata && typeof account.metadata === 'object' ? account.metadata : {};
+  const knownKeys = new Set(
+    [metadata.runtimeProviderKey, metadata.profileProvider, account.vendorId]
+      .map((entry) => String(entry || '').trim())
+      .filter(Boolean),
+  );
+  if (knownKeys.has(current)) return true;
+  if (account.vendorId === 'google' && current === 'gemini') return true;
+  if (account.vendorId === 'ollama' && current.startsWith('ollama')) return true;
+  return false;
+}
+
+function getRuntimeProviderKey(account) {
+  const metadata = account.metadata && typeof account.metadata === 'object' ? account.metadata : {};
+  return String(metadata.runtimeProviderKey || metadata.profileProvider || account.vendorId || 'openai');
+}
+
+async function getCurrentDefaultModelRef(state) {
+  try {
+    const snapshot = await listAgentsSnapshot(state);
+    const defaultAgent = snapshot.agents.find((agent) => agent.id === snapshot.defaultAgentId) || snapshot.agents[0];
+    if (defaultAgent?.modelDisplay && defaultAgent.modelDisplay !== 'Unconfigured') {
+      return defaultAgent.modelDisplay;
+    }
+  } catch {
+    // Fall back to config if the CLI is temporarily unavailable.
+  }
+
+  const config = await readOpenClawConfig();
+  return config?.agents?.defaults?.model
+    || config?.session?.model
+    || config?.model
+    || undefined;
+}
+
+async function hydrateProviderAccountsFromOpenClaw(state) {
+  const authStore = await readAuthProfiles();
+  const currentModel = parseModelRef(await getCurrentDefaultModelRef(state));
+  const now = new Date().toISOString();
+  const existingByProfileId = new Map();
+
+  for (const account of state.providerAccounts || []) {
+    const metadata = account.metadata && typeof account.metadata === 'object' ? account.metadata : {};
+    const profileId = String(metadata.profileId || account.id || '');
+    if (profileId) existingByProfileId.set(profileId, account);
+  }
+
+  const nextAccounts = [];
+  for (const [profileId, profile] of Object.entries(authStore.profiles || {})) {
+    if (!profile || typeof profile !== 'object') continue;
+    const runtimeProviderKey = String(profile.provider || profileId.split(':')[0] || '');
+    const vendorId = inferVendorId(runtimeProviderKey);
+    const vendor = PROVIDER_VENDORS.find((entry) => entry.id === vendorId);
+    const existing = existingByProfileId.get(profileId);
+
+    nextAccounts.push({
+      id: profileId,
+      vendorId,
+      label: existing?.label || vendor?.name || titleCase(vendorId),
+      authMode: profile.type === 'oauth' ? 'oauth_browser' : (existing?.authMode || vendor?.defaultAuthMode || 'api_key'),
+      baseUrl: existing?.baseUrl || vendor?.defaultBaseUrl,
+      apiProtocol: existing?.apiProtocol || defaultProtocolForVendor(vendorId),
+      model: providerKeyMatches(existing || { vendorId, metadata: { runtimeProviderKey } }, currentModel.providerKey)
+        ? currentModel.modelId
+        : existing?.model,
+      enabled: existing?.enabled !== false,
+      isDefault: false,
+      secret: profile.type === 'api_key' ? profile.key : existing?.secret,
+      metadata: {
+        ...(existing?.metadata || {}),
+        profileId,
+        profileProvider: runtimeProviderKey,
+        runtimeProviderKey,
+      },
+      createdAt: existing?.createdAt || now,
+      updatedAt: existing?.updatedAt || now,
+    });
+  }
+
+  for (const account of state.providerAccounts || []) {
+    const metadata = account.metadata && typeof account.metadata === 'object' ? account.metadata : {};
+    const profileId = String(metadata.profileId || account.id || '');
+    if (profileId && authStore.profiles?.[profileId]) continue;
+    if (account.authMode === 'local' || account.vendorId === 'ollama') {
+      nextAccounts.push({
+        ...account,
+        metadata: {
+          ...metadata,
+          runtimeProviderKey: metadata.runtimeProviderKey || 'ollama',
+        },
+      });
+    }
+  }
+
+  const defaultAccount = nextAccounts.find((account) => providerKeyMatches(account, currentModel.providerKey))
+    || nextAccounts.find((account) => account.id === state.defaultProviderAccountId)
+    || nextAccounts[0];
+  const nextDefaultProviderAccountId = defaultAccount?.id || null;
+
+  const changed = JSON.stringify({
+    providerAccounts: state.providerAccounts,
+    defaultProviderAccountId: state.defaultProviderAccountId,
+  }) !== JSON.stringify({
+    providerAccounts: nextAccounts,
+    defaultProviderAccountId: nextDefaultProviderAccountId,
+  });
+
+  state.providerAccounts = nextAccounts;
+  state.defaultProviderAccountId = nextDefaultProviderAccountId;
+
+  if (changed) {
+    await saveState(state);
+  }
+
+  return state;
 }
 
 async function syncProviderAccountsToAuth(state) {
+  const authStore = await readAuthProfiles();
   const profiles = {};
+  const order = {};
+  const lastGood = {};
+
   for (const account of state.providerAccounts) {
-    const key = `${account.vendorId}:${account.id}`;
-    profiles[key] = {
-      type: account.authMode === 'local' ? 'api_key' : 'api_key',
-      provider: account.vendorId,
-      key: account.secret || '',
+    const runtimeProviderKey = getRuntimeProviderKey(account);
+    const metadata = account.metadata && typeof account.metadata === 'object' ? account.metadata : {};
+    const profileId = String(metadata.profileId || `${runtimeProviderKey}:${account.id}`);
+    account.metadata = {
+      ...metadata,
+      profileId,
+      profileProvider: runtimeProviderKey,
+      runtimeProviderKey,
     };
+
+    if (account.authMode === 'local') {
+      continue;
+    }
+
+    const existingProfile = authStore.profiles?.[profileId];
+    if ((account.authMode === 'oauth_browser' || account.authMode === 'oauth_device') && existingProfile?.type === 'oauth') {
+      profiles[profileId] = existingProfile;
+    } else {
+      profiles[profileId] = {
+        type: 'api_key',
+        provider: runtimeProviderKey,
+        key: account.secret || '',
+      };
+    }
+
+    order[runtimeProviderKey] ||= [];
+    order[runtimeProviderKey].push(profileId);
+    if (account.id === state.defaultProviderAccountId || account.isDefault) {
+      lastGood[runtimeProviderKey] = profileId;
+    }
   }
-  await writeAuthProfiles(profiles);
+
+  await writeAuthProfiles({ version: authStore.version || 1, profiles, order, lastGood });
 
   const defaultAccount = state.providerAccounts.find((item) => item.id === state.defaultProviderAccountId)
     || state.providerAccounts.find((item) => item.isDefault);
   if (defaultAccount?.model) {
-    await runOpenClaw(['models', 'set', `${defaultAccount.vendorId}/${defaultAccount.model}`]).catch(() => { });
+    const runtimeProviderKey = getRuntimeProviderKey(defaultAccount);
+    await runOpenClaw(['models', 'set', `${runtimeProviderKey}/${defaultAccount.model}`]).catch(() => { });
   }
 }
 
 async function loadProviderAccounts(state) {
-  return state.providerAccounts.map((account) => ({
+  const hydrated = await hydrateProviderAccountsFromOpenClaw(state);
+  return hydrated.providerAccounts.map((account) => ({
     id: account.id,
     vendorId: account.vendorId,
     label: account.label,
@@ -415,7 +670,7 @@ async function loadProviderAccounts(state) {
     apiProtocol: account.apiProtocol,
     model: account.model,
     enabled: account.enabled !== false,
-    isDefault: account.id === state.defaultProviderAccountId,
+    isDefault: account.id === hydrated.defaultProviderAccountId,
     createdAt: account.createdAt,
     updatedAt: account.updatedAt,
   }));
@@ -432,6 +687,15 @@ function updateGatewayStatus(next) {
 async function startGateway() {
   const state = await loadState();
   if (gatewayProcess && !gatewayProcess.killed) return;
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${state.settings.gatewayPort}/`);
+    // If we get any HTTP response (even 404), the underlying gateway HTTP server is alive
+    updateGatewayStatus({ state: 'running', error: undefined });
+    return;
+  } catch (err) {
+    // Expected if not running, will proceed to start
+  }
 
   await ensureOpenClawScaffold();
   const args = [
@@ -500,6 +764,36 @@ async function stageBuffer(base64, fileName, mimeType) {
     stagedPath: filePath,
     preview: mimeType?.startsWith('image/') ? `data:${mimeType};base64,${base64}` : null,
   };
+}
+
+function getLobsterDocumentMeta(documentId) {
+  return LOBSTER_DOCUMENTS.find((entry) => entry.id === documentId) || null;
+}
+
+async function readLobsterDocument(documentId) {
+  const meta = getLobsterDocumentMeta(documentId);
+  if (!meta) {
+    throw new Error(`Unknown lobster document: ${documentId}`);
+  }
+  try {
+    const content = await fs.readFile(meta.path, 'utf8');
+    return { ...meta, content };
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+      return { ...meta, content: '' };
+    }
+    throw error;
+  }
+}
+
+async function writeLobsterDocument(documentId, content) {
+  const meta = getLobsterDocumentMeta(documentId);
+  if (!meta) {
+    throw new Error(`Unknown lobster document: ${documentId}`);
+  }
+  await ensureDir(path.dirname(meta.path));
+  await fs.writeFile(meta.path, String(content || ''), 'utf8');
+  return { ...meta, content: String(content || '') };
 }
 
 async function sendChatMessage(body) {
@@ -628,10 +922,12 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/api/app/gateway-info' && req.method === 'GET') {
       const state = await loadState();
       const protocol = (req.headers['x-forwarded-proto'] || '').toString().includes('https') ? 'wss' : 'ws';
+      const clientId = getClientIdFromIp(req.socket.remoteAddress);
       sendJson(res, 200, {
         wsUrl: `${protocol}://${url.hostname}:${PORT}/ws`,
         token: state.settings.gatewayToken,
         port: state.settings.gatewayPort,
+        clientId,
       });
       return;
     }
@@ -652,6 +948,19 @@ const server = createServer(async (req, res) => {
       await stopGateway();
       await startGateway();
       sendJson(res, 200, { success: true });
+      return;
+    }
+
+    if (url.pathname === '/api/gateway/rpc' && req.method === 'POST') {
+      const body = await readBody(req);
+      const state = await loadState();
+      const method = String(body.method || '');
+      if (!method) {
+        sendJson(res, 400, { success: false, error: 'Missing RPC method.' });
+        return;
+      }
+      const result = await gatewayCall(state, method, body.params || {});
+      sendJson(res, 200, result);
       return;
     }
 
@@ -755,40 +1064,45 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/provider-accounts' && req.method === 'GET') {
-      const state = await loadState();
+      const state = await hydrateProviderAccountsFromOpenClaw(await loadState());
       sendJson(res, 200, await loadProviderAccounts(state));
       return;
     }
 
     if (url.pathname === '/api/provider-accounts' && req.method === 'POST') {
       const body = await readBody(req);
-      const state = await loadState();
+      const state = await hydrateProviderAccountsFromOpenClaw(await loadState());
       const account = {
         ...body.account,
         secret: body.apiKey || '',
+        metadata: {
+          ...(body.account?.metadata || {}),
+          runtimeProviderKey: body.account?.vendorId,
+        },
       };
+      state.providerAccounts = state.providerAccounts.filter((item) => item.id !== account.id);
       state.providerAccounts.push(account);
       if (account.isDefault || !state.defaultProviderAccountId) {
         state.defaultProviderAccountId = account.id;
       }
-      await saveState(state);
       await syncProviderAccountsToAuth(state);
+      await saveState(state);
       sendJson(res, 200, { success: true, account });
       return;
     }
 
     if (url.pathname === '/api/provider-accounts/default' && req.method === 'GET') {
-      const state = await loadState();
+      const state = await hydrateProviderAccountsFromOpenClaw(await loadState());
       sendJson(res, 200, { accountId: state.defaultProviderAccountId });
       return;
     }
 
     if (url.pathname === '/api/provider-accounts/default' && req.method === 'PUT') {
       const body = await readBody(req);
-      const state = await loadState();
+      const state = await hydrateProviderAccountsFromOpenClaw(await loadState());
       state.defaultProviderAccountId = body.accountId;
-      await saveState(state);
       await syncProviderAccountsToAuth(state);
+      await saveState(state);
       sendJson(res, 200, { success: true });
       return;
     }
@@ -796,7 +1110,7 @@ const server = createServer(async (req, res) => {
     if (url.pathname.startsWith('/api/provider-accounts/') && req.method === 'PUT') {
       const accountId = decodeURIComponent(url.pathname.slice('/api/provider-accounts/'.length));
       const body = await readBody(req);
-      const state = await loadState();
+      const state = await hydrateProviderAccountsFromOpenClaw(await loadState());
       const account = state.providerAccounts.find((item) => item.id === accountId);
       if (account) {
         Object.assign(account, body.updates || {});
@@ -805,21 +1119,21 @@ const server = createServer(async (req, res) => {
         }
         account.updatedAt = new Date().toISOString();
       }
-      await saveState(state);
       await syncProviderAccountsToAuth(state);
+      await saveState(state);
       sendJson(res, 200, { success: true, account });
       return;
     }
 
     if (url.pathname.startsWith('/api/provider-accounts/') && req.method === 'DELETE') {
       const accountId = decodeURIComponent(url.pathname.slice('/api/provider-accounts/'.length));
-      const state = await loadState();
+      const state = await hydrateProviderAccountsFromOpenClaw(await loadState());
       state.providerAccounts = state.providerAccounts.filter((item) => item.id !== accountId);
       if (state.defaultProviderAccountId === accountId) {
         state.defaultProviderAccountId = state.providerAccounts[0]?.id || null;
       }
-      await saveState(state);
       await syncProviderAccountsToAuth(state);
+      await saveState(state);
       sendJson(res, 200, { success: true });
       return;
     }
@@ -971,6 +1285,36 @@ const server = createServer(async (req, res) => {
           `[bridge] config ${OPENCLAW_CONFIG}`,
         ].join('\n'),
       });
+      return;
+    }
+
+    if (url.pathname === '/api/lobster/documents' && req.method === 'GET') {
+      sendJson(res, 200, {
+        items: await Promise.all(LOBSTER_DOCUMENTS.map(async (entry) => {
+          const loaded = await readLobsterDocument(entry.id);
+          return {
+            id: entry.id,
+            name: entry.name,
+            description: entry.description,
+            path: entry.path,
+            updatedAt: existsSync(entry.path) ? (await fs.stat(entry.path)).mtime.toISOString() : null,
+            size: loaded.content.length,
+          };
+        })),
+      });
+      return;
+    }
+
+    if (url.pathname.startsWith('/api/lobster/documents/') && req.method === 'GET') {
+      const documentId = decodeURIComponent(url.pathname.slice('/api/lobster/documents/'.length));
+      sendJson(res, 200, await readLobsterDocument(documentId));
+      return;
+    }
+
+    if (url.pathname.startsWith('/api/lobster/documents/') && req.method === 'PUT') {
+      const documentId = decodeURIComponent(url.pathname.slice('/api/lobster/documents/'.length));
+      const body = await readBody(req);
+      sendJson(res, 200, { success: true, ...(await writeLobsterDocument(documentId, body.content)) });
       return;
     }
 
