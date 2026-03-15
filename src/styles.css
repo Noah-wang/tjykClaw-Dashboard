@@ -931,6 +931,10 @@ tbody tr:last-child td {
   border-style: dashed;
 }
 
+.message.thinking-message {
+  gap: 10px;
+}
+
 .message.system {
   background: rgba(30, 140, 88, 0.08);
 }
@@ -940,6 +944,22 @@ tbody tr:last-child td {
   white-space: pre-wrap;
   word-break: break-word;
   max-width: 100%;
+}
+
+.thinking-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+}
+
+.thinking-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #d58819;
+  box-shadow: 0 0 0 4px rgba(213, 136, 25, 0.12);
+  flex-shrink: 0;
 }
 
 .skills-grid {

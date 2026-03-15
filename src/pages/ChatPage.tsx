@@ -124,6 +124,11 @@ type PendingMessage = RawMessage & {
   baselineMatchCount?: number;
 };
 
+type ThinkingState = {
+  sessionKey: string;
+  baselineAssistantCount: number;
+};
+
 function isPendingMessageResolved(history: RawMessage[], pending: PendingMessage): boolean {
   const pendingText = normalizeMessageContent(pending.content).trim();
   if (!pendingText) return false;
@@ -159,7 +164,10 @@ export function ChatPage() {
   const [gatewayStatus, setGatewayStatus] = useState<GatewayStatus | null>(null);
   const dragDepthRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const composeInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const threadRef = useRef<HTMLDivElement | null>(null);
   const lastGatewayConsoleKeyRef = useRef<string | null>(null);
+  const [thinkingState, setThinkingState] = useState<ThinkingState | null>(null);
 
   const resolveMainSessionKey = (agentId: string, sourceAgents: AgentSummary[] = agents) => {
     return sourceAgents.find((agent) => agent.id === agentId)?.mainSessionKey || buildMainSessionKey(agentId);
@@ -198,6 +206,14 @@ export function ChatPage() {
     try {
       const history = await getChatHistory(sessionKey);
       setMessages(history);
+      setThinkingState((current) => {
+        if (!current || current.sessionKey !== sessionKey) return current;
+        const assistantCount = history.filter((message) => message.role === 'assistant').length;
+        if (assistantCount > current.baselineAssistantCount) {
+          return null;
+        }
+        return current;
+      });
       const summary = buildSessionSummary(history);
       if (summary) {
         setSessionSummaries((current) => ({ ...current, [sessionKey]: summary }));
@@ -220,6 +236,12 @@ export function ChatPage() {
 
   useEffect(() => {
     void loadHistory(currentSessionKey, { silent: false });
+  }, [currentSessionKey]);
+
+  useEffect(() => {
+    setDraft('');
+    setAttachments([]);
+    composeInputRef.current?.focus();
   }, [currentSessionKey]);
 
   useEffect(() => {
@@ -325,6 +347,7 @@ export function ChatPage() {
   }, [currentSessionKey, messages, pendingMessages]);
 
   const currentSessionSummary = currentSessionKey ? sessionSummaries[currentSessionKey] : null;
+  const showThinkingIndicator = Boolean(thinkingState && thinkingState.sessionKey === currentSessionKey);
 
   useEffect(() => {
     const pending = currentAgentSessions.filter((session) => !sessionSummaries[session.key]);
@@ -349,8 +372,17 @@ export function ChatPage() {
     };
   }, [currentAgentSessions, sessionSummaries]);
 
+  useEffect(() => {
+    const node = threadRef.current;
+    if (!node) return;
+    window.requestAnimationFrame(() => {
+      node.scrollTop = node.scrollHeight;
+    });
+  }, [currentSessionKey, displayedMessages.length, showThinkingIndicator]);
+
   const handleSelectAgent = (agentId: string) => {
     setCurrentAgentId(agentId);
+    setThinkingState(null);
     const related = sessions
       .filter((session) => session.key.startsWith(`agent:${agentId}:`) && isCurrentClientSession(session.key))
       .sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0));
@@ -358,6 +390,7 @@ export function ChatPage() {
   };
 
   const handleSelectSession = (sessionKey: string) => {
+    setThinkingState(null);
     setCurrentSessionKey(sessionKey);
   };
 
@@ -375,6 +408,7 @@ export function ChatPage() {
     setCurrentAgentId(agentId);
     setSessions((current) => [placeholderSession, ...current.filter((session) => session.key !== nextSessionKey)]);
     setCurrentSessionKey(nextSessionKey);
+    setThinkingState(null);
     setSessionSummaries((current) => ({
       ...current,
       [nextSessionKey]: {
@@ -438,6 +472,7 @@ export function ChatPage() {
     if (!draft.trim() && attachments.length === 0) return;
     const messageText = draft;
     const stagedAttachments = attachments;
+    const assistantBaselineCount = messages.filter((message) => message.role === 'assistant').length;
     const pendingText = normalizeMessageContent(messageText).trim();
     const baselineMatchCount = messages.filter((message) => (
       message.role === 'user' && normalizeMessageContent(message.content).trim() === pendingText
@@ -452,7 +487,13 @@ export function ChatPage() {
       _attachedFiles: stagedAttachments,
     };
     setSending(true);
+    setDraft('');
+    setAttachments([]);
     setPendingMessages((current) => [...current, pendingMessage]);
+    setThinkingState({
+      sessionKey: currentSessionKey,
+      baselineAssistantCount: assistantBaselineCount,
+    });
     setSessionSummaries((current) => {
       if (current[currentSessionKey]?.title && current[currentSessionKey].title !== '新对话') {
         return current;
@@ -466,20 +507,19 @@ export function ChatPage() {
       };
     });
     const pollTimer = window.setInterval(() => {
-      void loadSessions();
+      void loadSessions({ silent: true });
       void loadHistory(currentSessionKey, { silent: true });
     }, 3000);
     try {
       await sendChatMessage(currentSessionKey, messageText, stagedAttachments);
-      setDraft('');
-      setAttachments([]);
       window.setTimeout(() => {
-        void loadSessions();
+        void loadSessions({ silent: true });
         void loadHistory(currentSessionKey, { silent: true });
       }, 700);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setPendingMessages((current) => current.filter((item) => item.id !== pendingMessage.id));
+      setThinkingState((current) => (current?.sessionKey === currentSessionKey ? null : current));
       toast.error(message);
       void loadHistory(currentSessionKey, { silent: true });
     } finally {
@@ -640,6 +680,7 @@ export function ChatPage() {
                   setAborting(true);
                   void abortChat(currentSessionKey).finally(() => {
                     setSending(false);
+                    setThinkingState((current) => (current?.sessionKey === currentSessionKey ? null : current));
                     setAborting(false);
                     void loadHistory(currentSessionKey, { silent: true });
                   });
@@ -670,7 +711,7 @@ export function ChatPage() {
             </div>
           </div>
 
-          <div className="chat-thread">
+          <div className="chat-thread" ref={threadRef}>
             {loadingHistory ? <div className="empty">正在读取聊天内容…</div> : null}
             {displayedMessages.map((message, index) => (
               (() => {
@@ -687,6 +728,15 @@ export function ChatPage() {
                 );
               })()
             ))}
+            {!loadingHistory && showThinkingIndicator ? (
+              <div className="message assistant thinking-message">
+                <div className="eyebrow">助手</div>
+                <div className="thinking-inline">
+                  <span className="thinking-pulse" aria-hidden="true" />
+                  <span>正在思考…</span>
+                </div>
+              </div>
+            ) : null}
             {!loadingHistory && displayedMessages.length === 0 ? <div className="empty">这里还没有聊天内容。</div> : null}
           </div>
 
@@ -706,7 +756,7 @@ export function ChatPage() {
             />
             <div className="field">
               <label>消息内容</label>
-              <textarea value={draft} onChange={(event) => setDraft(event.target.value)} />
+              <textarea ref={composeInputRef} value={draft} onChange={(event) => setDraft(event.target.value)} />
             </div>
 
             <div className="cluster chat-compose-actions">
