@@ -40,8 +40,8 @@ export function PairingPage(props: {
             <div className="eyebrow">配对一次，局域网内随时控制</div>
             <h1>让你的 AI 设备直接拥有网页控制台。</h1>
             <p>
-              `tjykClaw-Dashboard` 面向同一 Wi‑Fi 下的独立设备。只要填入设备宿主 API 地址，
-              就可以在浏览器里统一管理智能体、渠道、技能、定时任务和会话。
+              `tjykClaw-Dashboard` 面向同一 Wi‑Fi 下的独立设备。只要填入设备地址，
+              就可以在浏览器里统一管理角色、外部接入、技能、自动任务和聊天内容。
             </p>
           </div>
 
@@ -52,11 +52,11 @@ export function PairingPage(props: {
             </div>
             <div className="panel">
               <div className="eyebrow"><Cpu size={14} /> 设备承载</div>
-              <p className="stat-note">运行时驻留在硬件上，浏览器只负责控制与观测。</p>
+              <p className="stat-note">核心能力都跑在硬件上，浏览器只负责查看和操作。</p>
             </div>
             <div className="panel">
               <div className="eyebrow"><ShieldCheck size={14} /> 配对记录</div>
-              <p className="stat-note">本地保存可信设备信息，下次可直接重连。</p>
+              <p className="stat-note">本地会记住设备信息，下次可以直接连回去。</p>
             </div>
           </div>
         </section>
@@ -65,7 +65,7 @@ export function PairingPage(props: {
           <div className="section-title">
             <div>
               <h2>配对设备</h2>
-              <p>填写设备宿主 API 地址，格式一般为 `http://设备IP:3210`。</p>
+              <p>填写设备地址，格式一般为 `http://设备IP:3210`。</p>
             </div>
           </div>
 
@@ -90,8 +90,7 @@ export function PairingPage(props: {
           </div>
 
           <div className="notice warn">
-            页面已经准备好。若要真正通过局域网访问，设备必须在上面的地址暴露兼容
-            `/api/*` 的服务。
+            页面已经准备好。若要真正通过局域网访问，设备需要在上面的地址正常提供服务。
           </div>
 
           <div className="cluster">

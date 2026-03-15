@@ -1,48 +1,23 @@
 import { useEffect, useMemo, useState } from 'react';
-import {
-  getAgents,
-  getChannels,
-  getCronJobs,
-  getInstalledSkills,
-  getProviders,
-  getUsageHistory,
-} from '../lib/device-api';
-import { formatCurrency, formatGatewayState, formatTime, formatTokens } from '../lib/format';
-import type { GatewayStatus, UsageHistoryEntry } from '../lib/types';
+import { getOverview } from '../lib/device-api';
+import { formatCurrency, formatTime, formatTokens } from '../lib/format';
+import type { OverviewSnapshot } from '../lib/types';
 
-export function OverviewPage(props: {
-  gatewayStatus: GatewayStatus | null;
-  gatewayError: string | null;
-}) {
-  const [agents, setAgents] = useState(0);
-  const [channels, setChannels] = useState(0);
-  const [skills, setSkills] = useState(0);
-  const [providers, setProviders] = useState(0);
-  const [jobs, setJobs] = useState(0);
-  const [usage, setUsage] = useState<UsageHistoryEntry[]>([]);
+export function OverviewPage() {
+  const [snapshot, setSnapshot] = useState<OverviewSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
 
     const load = async () => {
-      const results = await Promise.allSettled([
-        getAgents(),
-        getChannels(),
-        getInstalledSkills(),
-        getProviders(),
-        getCronJobs(),
-        getUsageHistory(),
-      ]);
-      if (cancelled) return;
-
-      if (results[0].status === 'fulfilled') setAgents(results[0].value.agents.length);
-      if (results[1].status === 'fulfilled') setChannels(results[1].value.length);
-      if (results[2].status === 'fulfilled') setSkills(results[2].value.length);
-      if (results[3].status === 'fulfilled') setProviders(results[3].value.length);
-      if (results[4].status === 'fulfilled') setJobs(results[4].value.length);
-      if (results[5].status === 'fulfilled') setUsage(results[5].value);
-      setLoading(false);
+      try {
+        const next = await getOverview();
+        if (cancelled) return;
+        setSnapshot(next);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     };
 
     void load();
@@ -57,6 +32,7 @@ export function OverviewPage(props: {
   }, []);
 
   const usageSummary = useMemo(() => {
+    const usage = snapshot?.usage || [];
     return usage.reduce(
       (acc, entry) => {
         acc.totalTokens += entry.totalTokens;
@@ -65,68 +41,45 @@ export function OverviewPage(props: {
       },
       { totalTokens: 0, cost: 0 },
     );
-  }, [usage]);
+  }, [snapshot?.usage]);
 
-  const latestRuns = useMemo(() => usage.slice(0, 8), [usage]);
+  const latestRuns = useMemo(() => (snapshot?.usage || []).slice(0, 8), [snapshot?.usage]);
 
   return (
     <>
-      <section>
-        <div className="content-card panel">
-          <div className="section-title">
-            <div>
-              <h2>网关状态</h2>
-              <p>以下运行状态直接来自已配对设备。</p>
-            </div>
-          </div>
-          <div className="chip-row">
-            <span className={`chip ${props.gatewayStatus?.state === 'running' ? 'ok' : 'warn'}`}>
-              {formatGatewayState(props.gatewayStatus?.state)}
-            </span>
-            <span className="chip">端口 {props.gatewayStatus?.port || '暂无'}</span>
-            <span className="chip">PID {props.gatewayStatus?.pid || '暂无'}</span>
-          </div>
-          {props.gatewayStatus?.error ? <div className="notice danger">{props.gatewayStatus.error}</div> : null}
-          {props.gatewayError ? <div className="notice danger">{props.gatewayError}</div> : null}
-          <div className="notice">
-            连接时间：{props.gatewayStatus?.connectedAt ? formatTime(props.gatewayStatus.connectedAt) : '暂无'}
-          </div>
-        </div>
-      </section>
-
       <section className="grid-3">
         <div className="stat-card panel">
-          <span>智能体</span>
-          <strong>{loading ? '...' : agents}</strong>
-          <div className="stat-note">已配置的 OpenClaw 运行实例</div>
+          <span>角色</span>
+          <strong>{loading ? '...' : (snapshot?.agents ?? 0)}</strong>
+          <div className="stat-note">已经创建好的角色数量</div>
         </div>
         <div className="stat-card panel">
-          <span>渠道</span>
-          <strong>{loading ? '...' : channels}</strong>
-          <div className="stat-note">已启用的消息集成</div>
+          <span>外部接入</span>
+          <strong>{loading ? '...' : (snapshot?.channels ?? 0)}</strong>
+          <div className="stat-note">已经接上的外部消息方式</div>
         </div>
         <div className="stat-card panel">
           <span>技能</span>
-          <strong>{loading ? '...' : skills}</strong>
-          <div className="stat-note">已安装的能力包</div>
+          <strong>{loading ? '...' : (snapshot?.skills ?? 0)}</strong>
+          <div className="stat-note">已经添加的能力</div>
         </div>
       </section>
 
       <section className="grid-3">
         <div className="stat-card panel">
-          <span>提供商</span>
-          <strong>{loading ? '...' : providers}</strong>
-          <div className="stat-note">可供运行时使用的账号条目</div>
+          <span>模型账号</span>
+          <strong>{loading ? '...' : (snapshot?.providers ?? 0)}</strong>
+          <div className="stat-note">当前可以使用的模型来源</div>
         </div>
         <div className="stat-card panel">
-          <span>定时任务</span>
-          <strong>{loading ? '...' : jobs}</strong>
-          <div className="stat-note">当前已注册的自动化任务</div>
+          <span>自动任务</span>
+          <strong>{loading ? '...' : (snapshot?.jobs ?? 0)}</strong>
+          <div className="stat-note">已经设好的自动执行项目</div>
         </div>
         <div className="stat-card panel">
           <span>近期花费</span>
           <strong>{loading ? '...' : formatCurrency(usageSummary.cost)}</strong>
-          <div className="stat-note">已追踪历史中共 {formatTokens(usageSummary.totalTokens)} 个 Token</div>
+          <div className="stat-note">最近记录里一共用了 {formatTokens(usageSummary.totalTokens)}</div>
         </div>
       </section>
 
@@ -134,7 +87,7 @@ export function OverviewPage(props: {
         <div className="section-title">
           <div>
             <h2>最近用量记录</h2>
-            <p>展示设备最近解析出的用量条目。</p>
+            <p>这里显示最近的使用记录。</p>
           </div>
         </div>
         {latestRuns.length === 0 ? (
@@ -145,8 +98,8 @@ export function OverviewPage(props: {
               <thead>
                 <tr>
                   <th>时间</th>
-                  <th>智能体</th>
-                  <th>提供商 / 模型</th>
+                  <th>角色</th>
+                  <th>模型来源 / 模型</th>
                   <th>Token</th>
                   <th>费用</th>
                 </tr>

@@ -146,6 +146,15 @@ export type UsageHistoryEntry = {
   costUsd?: number;
 };
 
+export type OverviewSnapshot = {
+  agents: number;
+  channels: number;
+  skills: number;
+  providers: number;
+  jobs: number;
+  usage: UsageHistoryEntry[];
+};
+
 export type ChatSession = {
   key: string;
   label?: string;
@@ -178,6 +187,14 @@ export type StagedFile = {
   preview?: string | null;
 };
 
+export type UploadedFileRecord = {
+  id: string;
+  fileName: string;
+  storedPath: string;
+  fileSize: number;
+  updatedAt: string;
+};
+
 export type SettingsPayload = {
   theme?: 'light' | 'dark' | 'system';
   language?: string;
@@ -198,6 +215,55 @@ export type SettingsPayload = {
   sidebarCollapsed?: boolean;
   devModeUnlocked?: boolean;
   setupComplete?: boolean;
+};
+
+export type BackupConfig = {
+  enabled: boolean;
+  schedule: 'manual' | 'hourly' | 'daily' | string;
+  retentionCount: number;
+  includeSessions: boolean;
+  includeStorage: boolean;
+  rootDir: string;
+  preRestoreSnapshot: boolean;
+};
+
+export type BackupOperationResult = {
+  success: boolean;
+  snapshotId: string | null;
+  message: string;
+};
+
+export type BackupStatus = {
+  currentOperation: 'idle' | 'creating' | 'verifying' | 'restoring' | string;
+  currentSnapshotId: string | null;
+  message: string;
+  lastBackupAt: string | null;
+  lastRestoreAt: string | null;
+  lastVerifiedAt: string | null;
+  lastBackupResult: BackupOperationResult | null;
+  lastRestoreResult: BackupOperationResult | null;
+  lastVerificationResult: BackupOperationResult | null;
+};
+
+export type BackupSnapshot = {
+  id: string;
+  createdAt: string;
+  type: 'manual' | 'scheduled' | 'pre_restore' | string;
+  status: 'ready' | 'corrupt' | string;
+  restorable: boolean;
+  includes: string[];
+  archiveName: string;
+  archivePath: string;
+  archiveSize: number;
+  checksum: string;
+  rootDir: string;
+  note: string;
+  openclawVersion: string | null;
+  bridgeVersion: string | null;
+  verifiedAt: string | null;
+  lastVerificationOk: boolean | null;
+  lastVerificationMessage: string;
+  directory?: string;
 };
 
 export type RpcEnvelope<T> = {

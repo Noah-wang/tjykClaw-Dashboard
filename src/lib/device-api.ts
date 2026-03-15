@@ -1,5 +1,8 @@
 import type {
   AgentsSnapshot,
+  BackupConfig,
+  BackupSnapshot,
+  BackupStatus,
   ChannelRecord,
   ChatSession,
   CronJob,
@@ -8,12 +11,14 @@ import type {
   LobsterDocument,
   LobsterDocumentSummary,
   MarketplaceSkill,
+  OverviewSnapshot,
   ProviderAccount,
   ProviderVendor,
   RawMessage,
   SettingsPayload,
   SkillRecord,
   StagedFile,
+  UploadedFileRecord,
   UsageHistoryEntry,
 } from './types';
 import { createId } from './id';
@@ -21,6 +26,7 @@ import { createId } from './id';
 const DEVICE_KEY = 'tjykclaw-dashboard.device';
 const LEGACY_DEVICE_KEY = 'clawx-web-lan.device';
 const CHAT_CLIENT_KEY = 'tjykclaw-dashboard.chat-client';
+const GET_CACHE = new Map<string, { expiresAt: number; value: unknown }>();
 
 type DeviceResponse<T> = T & { success?: boolean; error?: string };
 
@@ -29,6 +35,64 @@ function normalizeUrl(value: string): string {
   if (!trimmed) return '';
   const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
   return withProtocol.replace(/\/+$/, '');
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const value = String(hostname || '').toLowerCase();
+  return value === 'localhost' || value === '127.0.0.1' || value === '::1';
+}
+
+function normalizeLocalLoopback(baseUrl: string): string {
+  if (typeof window === 'undefined') return baseUrl;
+  try {
+    const target = new URL(baseUrl);
+    const current = new URL(window.location.origin);
+    if (
+      isLoopbackHostname(target.hostname) &&
+      isLoopbackHostname(current.hostname) &&
+      target.port === current.port &&
+      target.protocol === current.protocol
+    ) {
+      return current.origin;
+    }
+  } catch {
+    return baseUrl;
+  }
+  return baseUrl;
+}
+
+function buildCacheKey(baseUrl: string, path: string): string {
+  return `${baseUrl}${path}`;
+}
+
+function readCachedValue<T>(key: string): T | null {
+  const hit = GET_CACHE.get(key);
+  if (!hit) return null;
+  if (hit.expiresAt <= Date.now()) {
+    GET_CACHE.delete(key);
+    return null;
+  }
+  return hit.value as T;
+}
+
+function writeCachedValue<T>(key: string, value: T, ttlMs: number): T {
+  GET_CACHE.set(key, {
+    expiresAt: Date.now() + ttlMs,
+    value,
+  });
+  return value;
+}
+
+function clearApiCache(prefixes?: string[]): void {
+  if (!prefixes?.length) {
+    GET_CACHE.clear();
+    return;
+  }
+  for (const key of Array.from(GET_CACHE.keys())) {
+    if (prefixes.some((prefix) => key.includes(prefix))) {
+      GET_CACHE.delete(key);
+    }
+  }
 }
 
 export function listKnownChannelTypes(): string[] {
@@ -55,9 +119,10 @@ export function readDeviceProfile(): DeviceProfile | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as DeviceProfile;
     if (!parsed?.baseUrl) return null;
+    const normalizedBaseUrl = normalizeLocalLoopback(normalizeUrl(parsed.baseUrl));
     return {
       ...parsed,
-      baseUrl: normalizeUrl(parsed.baseUrl),
+      baseUrl: normalizedBaseUrl,
     };
   } catch {
     return null;
@@ -65,9 +130,10 @@ export function readDeviceProfile(): DeviceProfile | null {
 }
 
 export function saveDeviceProfile(profile: DeviceProfile): void {
+  const normalizedBaseUrl = normalizeLocalLoopback(normalizeUrl(profile.baseUrl));
   const serialized = JSON.stringify({
     ...profile,
-    baseUrl: normalizeUrl(profile.baseUrl),
+    baseUrl: normalizedBaseUrl,
   });
   window.localStorage.setItem(DEVICE_KEY, serialized);
   window.localStorage.removeItem(LEGACY_DEVICE_KEY);
@@ -87,19 +153,20 @@ export function getChatClientId(): string {
 }
 
 export function buildMainSessionKey(agentId: string): string {
-  return `agent:${agentId}:main:${getChatClientId()}`;
+  return `agent:${agentId}:main`;
 }
 
 export function buildNewSessionKey(agentId: string): string {
-  return `agent:${agentId}:session-${Date.now()}:${getChatClientId()}`;
+  return `agent:${agentId}:session-${Date.now()}`;
 }
 
 export function isCurrentClientSession(sessionKey: string): boolean {
-  return String(sessionKey || '').endsWith(`:${getChatClientId()}`);
+  void sessionKey;
+  return true;
 }
 
 function ensureDeviceBase(baseUrl?: string): string {
-  const resolved = normalizeUrl(baseUrl || readDeviceProfile()?.baseUrl || '');
+  const resolved = normalizeLocalLoopback(normalizeUrl(baseUrl || readDeviceProfile()?.baseUrl || ''));
   if (!resolved) {
     throw new Error('当前还没有已配对设备。');
   }
@@ -138,12 +205,25 @@ export async function deviceFetch<T>(path: string, init?: RequestInit, baseUrl?:
   return parseJson<T>(response);
 }
 
+async function cachedDeviceFetch<T>(path: string, ttlMs: number, baseUrl?: string): Promise<T> {
+  const target = ensureDeviceBase(baseUrl);
+  const key = buildCacheKey(target, path);
+  const cached = readCachedValue<T>(key);
+  if (cached !== null) return cached;
+  const value = await deviceFetch<T>(path, undefined, target);
+  return writeCachedValue(key, value, ttlMs);
+}
+
 export async function probeDevice(baseUrl: string): Promise<GatewayStatus> {
   return deviceFetch<GatewayStatus>('/api/gateway/status', undefined, baseUrl);
 }
 
 export async function getGatewayStatus(): Promise<GatewayStatus> {
   return deviceFetch<GatewayStatus>('/api/gateway/status');
+}
+
+export async function getOverview(): Promise<OverviewSnapshot> {
+  return cachedDeviceFetch<OverviewSnapshot>('/api/overview', 6000);
 }
 
 export async function startGateway(): Promise<void> {
@@ -171,44 +251,115 @@ export async function updateSettings(patch: Partial<SettingsPayload>): Promise<v
     method: 'PUT',
     body: JSON.stringify(patch),
   });
+  clearApiCache(['/api/settings']);
+}
+
+export async function getBackupConfig(): Promise<BackupConfig> {
+  return deviceFetch('/api/backups/config');
+}
+
+export async function updateBackupConfig(patch: Partial<BackupConfig>): Promise<BackupConfig> {
+  const response = await deviceFetch<{ config: BackupConfig }>('/api/backups/config', {
+    method: 'PUT',
+    body: JSON.stringify(patch),
+  });
+  return response.config;
+}
+
+export async function getBackupStatus(): Promise<BackupStatus> {
+  return cachedDeviceFetch('/api/backups/status', 4000);
+}
+
+export async function listBackupSnapshots(): Promise<BackupSnapshot[]> {
+  const response = await cachedDeviceFetch<{ items: BackupSnapshot[] }>('/api/backups/snapshots', 4000);
+  return response.items || [];
+}
+
+export async function createBackupSnapshot(input?: {
+  type?: string;
+  note?: string;
+  scope?: 'full' | 'files_only';
+}): Promise<BackupSnapshot> {
+  const response = await deviceFetch<{ snapshot: BackupSnapshot }>('/api/backups/snapshots', {
+    method: 'POST',
+    body: JSON.stringify(input || {}),
+  });
+  clearApiCache(['/api/backups/']);
+  return response.snapshot;
+}
+
+export async function verifyBackupSnapshot(snapshotId: string): Promise<BackupSnapshot> {
+  const response = await deviceFetch<{ snapshot: BackupSnapshot }>(`/api/backups/snapshots/${encodeURIComponent(snapshotId)}/verify`, {
+    method: 'POST',
+  });
+  clearApiCache(['/api/backups/']);
+  return response.snapshot;
+}
+
+export async function restoreBackupSnapshot(snapshotId: string): Promise<{ success: boolean; snapshotId: string; restoredAt?: string }> {
+  const response = await deviceFetch<{ success: boolean; snapshotId: string; restoredAt?: string }>(
+    `/api/backups/snapshots/${encodeURIComponent(snapshotId)}/restore`,
+    {
+    method: 'POST',
+    },
+  );
+  clearApiCache(['/api/backups/', '/api/overview', '/api/agents', '/api/provider-accounts', '/api/channels/']);
+  return response;
+}
+
+export async function deleteBackupSnapshot(snapshotId: string): Promise<void> {
+  await deviceFetch(`/api/backups/snapshots/${encodeURIComponent(snapshotId)}`, {
+    method: 'DELETE',
+  });
+  clearApiCache(['/api/backups/']);
 }
 
 export async function getAgents(): Promise<AgentsSnapshot> {
-  return deviceFetch<DeviceResponse<AgentsSnapshot>>('/api/agents');
+  return cachedDeviceFetch<DeviceResponse<AgentsSnapshot>>('/api/agents', 5000);
 }
 
 export async function createAgent(name: string): Promise<AgentsSnapshot> {
-  return deviceFetch<DeviceResponse<AgentsSnapshot>>('/api/agents', {
+  const response = await deviceFetch<DeviceResponse<AgentsSnapshot>>('/api/agents', {
     method: 'POST',
     body: JSON.stringify({ name }),
   });
+  clearApiCache(['/api/agents', '/api/overview']);
+  return response;
 }
 
 export async function renameAgent(agentId: string, name: string): Promise<AgentsSnapshot> {
-  return deviceFetch<DeviceResponse<AgentsSnapshot>>(`/api/agents/${encodeURIComponent(agentId)}`, {
+  const response = await deviceFetch<DeviceResponse<AgentsSnapshot>>(`/api/agents/${encodeURIComponent(agentId)}`, {
     method: 'PUT',
     body: JSON.stringify({ name }),
   });
+  clearApiCache(['/api/agents', '/api/overview']);
+  return response;
 }
 
 export async function deleteAgent(agentId: string): Promise<AgentsSnapshot> {
-  return deviceFetch<DeviceResponse<AgentsSnapshot>>(`/api/agents/${encodeURIComponent(agentId)}`, {
+  const response = await deviceFetch<DeviceResponse<AgentsSnapshot>>(`/api/agents/${encodeURIComponent(agentId)}`, {
     method: 'DELETE',
   });
+  clearApiCache(['/api/agents', '/api/overview']);
+  return response;
 }
 
 export async function assignAgentChannel(agentId: string, channelType: string): Promise<AgentsSnapshot> {
-  return deviceFetch<DeviceResponse<AgentsSnapshot>>(
+  const response = await deviceFetch<DeviceResponse<AgentsSnapshot>>(
     `/api/agents/${encodeURIComponent(agentId)}/channels/${encodeURIComponent(channelType)}`,
     { method: 'PUT' },
   );
+  clearApiCache(['/api/agents', '/api/channels/', '/api/overview']);
+  return response;
 }
 
 export async function removeAgentChannel(agentId: string, channelType: string): Promise<AgentsSnapshot> {
-  return deviceFetch<DeviceResponse<AgentsSnapshot>>(
+  const response = await deviceFetch<DeviceResponse<AgentsSnapshot>>(
     `/api/agents/${encodeURIComponent(agentId)}/channels/${encodeURIComponent(channelType)}`,
     { method: 'DELETE' },
   );
+  clearApiCache(['/api/agents', '/api/channels/', '/api/overview']);
+  return response;
 }
 
 export async function getChannels(): Promise<ChannelRecord[]> {
@@ -267,6 +418,7 @@ export async function saveChannelConfig(
     method: 'POST',
     body: JSON.stringify({ channelType, config, accountId }),
   });
+  clearApiCache(['/api/channels/', '/api/overview']);
 }
 
 export async function setChannelEnabled(channelType: string, enabled: boolean): Promise<void> {
@@ -274,16 +426,18 @@ export async function setChannelEnabled(channelType: string, enabled: boolean): 
     method: 'PUT',
     body: JSON.stringify({ channelType, enabled }),
   });
+  clearApiCache(['/api/channels/', '/api/overview']);
 }
 
 export async function deleteChannel(channelType: string): Promise<void> {
   await deviceFetch(`/api/channels/config/${encodeURIComponent(channelType)}`, {
     method: 'DELETE',
   });
+  clearApiCache(['/api/channels/', '/api/overview']);
 }
 
 export async function getProviders(): Promise<ProviderAccount[]> {
-  return deviceFetch('/api/provider-accounts');
+  return cachedDeviceFetch('/api/provider-accounts', 8000);
 }
 
 export async function getProviderVendors(): Promise<ProviderVendor[]> {
@@ -295,6 +449,7 @@ export async function createProviderAccount(account: ProviderAccount, apiKey?: s
     method: 'POST',
     body: JSON.stringify({ account, apiKey }),
   });
+  clearApiCache(['/api/provider-accounts', '/api/overview']);
 }
 
 export async function updateProviderAccount(
@@ -306,12 +461,14 @@ export async function updateProviderAccount(
     method: 'PUT',
     body: JSON.stringify({ updates, apiKey }),
   });
+  clearApiCache(['/api/provider-accounts', '/api/overview']);
 }
 
 export async function deleteProviderAccount(accountId: string): Promise<void> {
   await deviceFetch(`/api/provider-accounts/${encodeURIComponent(accountId)}`, {
     method: 'DELETE',
   });
+  clearApiCache(['/api/provider-accounts', '/api/overview']);
 }
 
 export async function setDefaultProviderAccount(accountId: string): Promise<void> {
@@ -319,12 +476,13 @@ export async function setDefaultProviderAccount(accountId: string): Promise<void
     method: 'PUT',
     body: JSON.stringify({ accountId }),
   });
+  clearApiCache(['/api/provider-accounts', '/api/overview']);
 }
 
 export async function getInstalledSkills(): Promise<SkillRecord[]> {
   const [installed, configs] = await Promise.all([
-    deviceFetch<{ success?: boolean; results?: Array<Record<string, unknown>> }>('/api/clawhub/list'),
-    deviceFetch<Record<string, { apiKey?: string; env?: Record<string, string> }>>('/api/skills/configs'),
+    cachedDeviceFetch<{ success?: boolean; results?: Array<Record<string, unknown>> }>('/api/clawhub/list', 15000),
+    cachedDeviceFetch<Record<string, { apiKey?: string; env?: Record<string, string> }>>('/api/skills/configs', 15000),
   ]);
   return (installed.results || []).map((entry) => {
     const slug = typeof entry.slug === 'string' ? entry.slug : undefined;
@@ -357,6 +515,7 @@ export async function installSkill(slug: string): Promise<void> {
     method: 'POST',
     body: JSON.stringify({ slug }),
   });
+  clearApiCache(['/api/clawhub/', '/api/skills/', '/api/overview']);
 }
 
 export async function uninstallSkill(slug: string): Promise<void> {
@@ -364,10 +523,11 @@ export async function uninstallSkill(slug: string): Promise<void> {
     method: 'POST',
     body: JSON.stringify({ slug }),
   });
+  clearApiCache(['/api/clawhub/', '/api/skills/', '/api/overview']);
 }
 
 export async function getCronJobs(): Promise<CronJob[]> {
-  return deviceFetch('/api/cron/jobs');
+  return cachedDeviceFetch('/api/cron/jobs', 8000);
 }
 
 export async function createCronJob(input: { name: string; message: string; schedule: string; enabled?: boolean }): Promise<void> {
@@ -375,6 +535,7 @@ export async function createCronJob(input: { name: string; message: string; sche
     method: 'POST',
     body: JSON.stringify(input),
   });
+  clearApiCache(['/api/cron/', '/api/overview']);
 }
 
 export async function updateCronJob(
@@ -385,12 +546,14 @@ export async function updateCronJob(
     method: 'PUT',
     body: JSON.stringify(patch),
   });
+  clearApiCache(['/api/cron/', '/api/overview']);
 }
 
 export async function deleteCronJob(id: string): Promise<void> {
   await deviceFetch(`/api/cron/jobs/${encodeURIComponent(id)}`, {
     method: 'DELETE',
   });
+  clearApiCache(['/api/cron/', '/api/overview']);
 }
 
 export async function toggleCronJob(id: string, enabled: boolean): Promise<void> {
@@ -398,6 +561,7 @@ export async function toggleCronJob(id: string, enabled: boolean): Promise<void>
     method: 'POST',
     body: JSON.stringify({ id, enabled }),
   });
+  clearApiCache(['/api/cron/', '/api/overview']);
 }
 
 export async function runCronJob(id: string): Promise<void> {
@@ -405,10 +569,11 @@ export async function runCronJob(id: string): Promise<void> {
     method: 'POST',
     body: JSON.stringify({ id }),
   });
+  clearApiCache(['/api/cron/', '/api/overview']);
 }
 
 export async function getUsageHistory(): Promise<UsageHistoryEntry[]> {
-  return deviceFetch('/api/usage/recent-token-history');
+  return cachedDeviceFetch('/api/usage/recent-token-history', 12000);
 }
 
 export async function getLogs(): Promise<{ content: string }> {
@@ -416,7 +581,7 @@ export async function getLogs(): Promise<{ content: string }> {
 }
 
 export async function getLobsterDocuments(): Promise<LobsterDocumentSummary[]> {
-  const response = await deviceFetch<{ items: LobsterDocumentSummary[] }>('/api/lobster/documents');
+  const response = await cachedDeviceFetch<{ items: LobsterDocumentSummary[] }>('/api/lobster/documents', 10000);
   return response.items || [];
 }
 
@@ -425,10 +590,12 @@ export async function getLobsterDocument(documentId: string): Promise<LobsterDoc
 }
 
 export async function saveLobsterDocument(documentId: string, content: string): Promise<LobsterDocument> {
-  return deviceFetch(`/api/lobster/documents/${encodeURIComponent(documentId)}`, {
+  const response = await deviceFetch<LobsterDocument>(`/api/lobster/documents/${encodeURIComponent(documentId)}`, {
     method: 'PUT',
     body: JSON.stringify({ content }),
   });
+  clearApiCache(['/api/lobster/documents']);
+  return response;
 }
 
 export async function runDoctor(mode: 'diagnose' | 'fix' = 'diagnose'): Promise<Record<string, unknown>> {
@@ -440,7 +607,7 @@ export async function runDoctor(mode: 'diagnose' | 'fix' = 'diagnose'): Promise<
 
 export async function stageFileBuffer(file: File): Promise<StagedFile> {
   const base64 = await fileToBase64(file);
-  return deviceFetch('/api/files/stage-buffer', {
+  const response = await deviceFetch<StagedFile>('/api/files/stage-buffer', {
     method: 'POST',
     body: JSON.stringify({
       base64,
@@ -448,6 +615,20 @@ export async function stageFileBuffer(file: File): Promise<StagedFile> {
       mimeType: file.type || 'application/octet-stream',
     }),
   });
+  clearApiCache(['/api/files/uploaded']);
+  return response;
+}
+
+export async function getUploadedFiles(): Promise<UploadedFileRecord[]> {
+  const response = await cachedDeviceFetch<{ items: UploadedFileRecord[] }>('/api/files/uploaded', 5000);
+  return response.items || [];
+}
+
+export async function deleteUploadedFile(fileId: string): Promise<void> {
+  await deviceFetch(`/api/files/uploaded/${encodeURIComponent(fileId)}`, {
+    method: 'DELETE',
+  });
+  clearApiCache(['/api/files/uploaded']);
 }
 
 async function fileToBase64(file: File): Promise<string> {
@@ -469,7 +650,7 @@ export async function sendChatMessage(
   const timeoutMs = 120_000;
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    await deviceFetch('/api/chat/send-with-media', {
+    const response = await deviceFetch<{ result?: { success?: boolean; error?: string } | null; error?: string }>('/api/chat/send-with-media', {
       method: 'POST',
       signal: controller.signal,
       body: JSON.stringify({
@@ -483,6 +664,10 @@ export async function sendChatMessage(
         })),
       }),
     });
+
+    if (response?.result && typeof response.result === 'object' && response.result.success === false) {
+      throw new Error(response.result.error || '发送失败。');
+    }
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
       throw new Error('发送超时，模型可能仍在后台运行。请等待几秒刷新会话，或点击“中止运行”。');
