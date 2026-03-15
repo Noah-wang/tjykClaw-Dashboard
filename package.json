@@ -9,6 +9,9 @@
     "preview": "vite preview",
     "mock-device": "node mock-device-server.mjs",
     "device-bridge": "node real-device-bridge.mjs",
+    "web-ui": "node frontend-web.mjs",
+    "release:bridge": "bash ./scripts/build-bridge-release.sh",
+    "release:web": "bash ./scripts/build-web-release.sh",
     "release:full": "bash ./scripts/build-full-release.sh"
   },
   "dependencies": {

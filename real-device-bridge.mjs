@@ -22,6 +22,7 @@ function getClientIdFromIp(ip) {
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 3210);
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || 'openclaw';
+const SERVE_STATIC = process.env.SERVE_STATIC !== '0';
 const DIST_DIR = path.join(process.cwd(), 'dist');
 const STATE_DIR = path.join(os.homedir(), '.tjykclaw-dashboard-bridge');
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
@@ -1641,6 +1642,13 @@ async function deleteSessionByKey(sessionKey) {
 }
 
 async function serveStatic(req, res, pathname) {
+  if (!SERVE_STATIC) {
+    sendJson(res, 404, {
+      success: false,
+      error: '前端网页未在这台设备上启用。请用独立网页包配对这个设备地址。',
+    });
+    return;
+  }
   if (!existsSync(DIST_DIR)) {
     sendJson(res, 503, { success: false, error: 'Missing dist. Run `pnpm build` first.' });
     return;
